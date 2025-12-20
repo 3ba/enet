@@ -2,6 +2,7 @@
  @file  protocol.c
  @brief ENet protocol functions
 */
+#include "enet/protocol.h"
 #include <stdio.h>
 #include <string.h>
 #define ENET_BUILDING_LIB 1
@@ -1020,17 +1021,36 @@ enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
     enet_uint16 peerID, flags;
     enet_uint8 sessionID;
 
+    ENetProtocolHeaderUbisoft *ubisoftHeader;
+
     if (host -> receivedDataLength < ENET_OFFSETOF(ENetProtocolHeader, sentTime))
       return 0;
 
     header = (ENetProtocolHeader *) host -> receivedData;
+    ubisoftHeader = (ENetProtocolHeaderUbisoft *)host -> receivedData;
 
-    peerID = ENET_NET_TO_HOST_16 (header -> peerID);
+    if (host -> handleNewPacket)
+    {
+      peerID = ENET_NET_TO_HOST_16 (ubisoftHeader -> peerID);
+    } 
+    else
+    {
+      peerID = ENET_NET_TO_HOST_16 (header -> peerID);
+    }
+    
     sessionID = (peerID & ENET_PROTOCOL_HEADER_SESSION_MASK) >> ENET_PROTOCOL_HEADER_SESSION_SHIFT;
     flags = peerID & ENET_PROTOCOL_HEADER_FLAG_MASK;
     peerID &= ~ (ENET_PROTOCOL_HEADER_FLAG_MASK | ENET_PROTOCOL_HEADER_SESSION_MASK);
 
-    headerSize = (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME ? sizeof (ENetProtocolHeader) : ENET_OFFSETOF(ENetProtocolHeader, sentTime));
+    if (host -> handleNewPacket)
+    {
+      headerSize = (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME ? sizeof (ENetProtocolHeaderUbisoft) : ENET_OFFSETOF(ENetProtocolHeaderUbisoft, sentTime));
+    }
+    else
+    {
+      headerSize = (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME ? sizeof (ENetProtocolHeader) : ENET_OFFSETOF(ENetProtocolHeader, sentTime));
+    }
+
     if (host -> checksum != NULL)
       headerSize += sizeof (enet_uint32);
 
@@ -1052,6 +1072,11 @@ enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
             sessionID != peer -> incomingSessionID))
          return 0;
     }
+
+    if (host -> handleNewPacket) {
+      // not necessary to compute unlesss required for game servers
+      uint16_t *integrity = (uint16_t *)&host->receivedData[headerSize - sizeof(uint16_t) * 3];
+    }
  
     if (flags & ENET_PROTOCOL_HEADER_FLAG_COMPRESSED)
     {
@@ -1067,7 +1092,14 @@ enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
         if (originalSize <= 0 || originalSize > sizeof (host -> packetData [1]) - headerSize)
           return 0;
 
-        memcpy (host -> packetData [1], header, headerSize);
+        if (host -> handleNewPacket)
+        {
+            memcpy(host->packetData[1], ubisoftHeader, headerSize);
+        }
+        else
+        {
+            memcpy(host->packetData[1], header, headerSize);
+        }
         host -> receivedData = host -> packetData [1];
         host -> receivedDataLength = headerSize + originalSize;
     }
@@ -1201,7 +1233,14 @@ enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
            if (! (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME))
              break;
 
-           sentTime = ENET_NET_TO_HOST_16 (header -> sentTime);
+           if (host->handleNewPacket)
+           {
+               sentTime = ENET_NET_TO_HOST_16 (ubisoftHeader->sentTime);
+           }
+           else
+           {
+               sentTime = ENET_NET_TO_HOST_16 (header->sentTime);
+           }
 
            switch (peer -> state)
            {
@@ -1601,13 +1640,28 @@ enet_protocol_check_outgoing_commands (ENetHost * host, ENetPeer * peer, ENetLis
 static int
 enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int checkForTimeouts)
 {
-    enet_uint8 headerData [sizeof (ENetProtocolHeader) + sizeof (enet_uint32)];
-    ENetProtocolHeader * header = (ENetProtocolHeader *) headerData;
+    size_t packetSize = host->usingNewPacket ? sizeof(ENetProtocolHeaderUbisoft) : sizeof(ENetProtocolHeader);
+    enet_uint8 headerData[sizeof(ENetProtocolHeaderUbisoft) + sizeof(enet_uint32)] = {0};
+    ENetProtocolHeader *header = (ENetProtocolHeader *)headerData;
+    ENetProtocolHeaderUbisoft *newHeader = (ENetProtocolHeaderUbisoft *)headerData;
+
     int sentLength = 0;
     size_t shouldCompress = 0;
     ENetList sentUnreliableCommands;
 
     enet_list_clear (& sentUnreliableCommands);
+
+    if (host->usingNewPacket)
+    {
+      enet_uint16 port = host->peers->address.port;
+
+      enet_uint16 rand1 = rand() % (port + 1);
+      enet_uint16 rand2 = rand();
+
+      newHeader->integrity[0] = ENET_HOST_TO_NET_16(rand1);
+      newHeader->integrity[1] = ENET_HOST_TO_NET_16(rand1 ^ port);
+      newHeader->integrity[2] = ENET_NET_TO_HOST_16(rand2 & 0x61D2 | 0x920D);
+    }
 
     for (int sendPass = 0, continueSending = 0; sendPass <= continueSending; ++ sendPass)
     for (ENetPeer * currentPeer = host -> peers;
@@ -1677,7 +1731,10 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
         host -> buffers -> data = headerData;
         if (host -> headerFlags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME)
         {
-            header -> sentTime = ENET_HOST_TO_NET_16 (host -> serviceTime & 0xFFFF);
+            if (host->usingNewPacket)
+              newHeader -> sentTime = ENET_HOST_TO_NET_16 (host->serviceTime & 0xFFFF);
+            else
+              header -> sentTime = ENET_HOST_TO_NET_16 (host->serviceTime & 0xFFFF);
 
             host -> buffers -> dataLength = sizeof (ENetProtocolHeader);
         }
@@ -1705,7 +1762,11 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
 
         if (currentPeer -> outgoingPeerID < ENET_PROTOCOL_MAXIMUM_PEER_ID)
           host -> headerFlags |= currentPeer -> outgoingSessionID << ENET_PROTOCOL_HEADER_SESSION_SHIFT;
-        header -> peerID = ENET_HOST_TO_NET_16 (currentPeer -> outgoingPeerID | host -> headerFlags);
+        
+        if (host->usingNewPacket)
+          newHeader -> peerID = ENET_HOST_TO_NET_16 (currentPeer->outgoingPeerID | host->headerFlags);
+        else
+          header -> peerID = ENET_HOST_TO_NET_16 (currentPeer -> outgoingPeerID | host -> headerFlags);
         if (host -> checksum != NULL)
         {
             enet_uint32 * checksum = (enet_uint32 *) & headerData [host -> buffers -> dataLength];
