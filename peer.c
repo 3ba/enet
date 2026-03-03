@@ -107,7 +107,7 @@ enet_peer_throttle (ENetPeer * peer, enet_uint32 rtt)
 int
 enet_peer_send (ENetPeer * peer, enet_uint8 channelID, ENetPacket * packet)
 {
-   ENetChannel * channel;
+   ENetChannel * channel = & peer -> channels [channelID];
    ENetProtocol command;
    size_t fragmentLength;
 
@@ -116,8 +116,11 @@ enet_peer_send (ENetPeer * peer, enet_uint8 channelID, ENetPacket * packet)
        packet -> dataLength > peer -> host -> maximumPacketSize)
      return -1;
 
-   channel = & peer -> channels [channelID];
-   fragmentLength = peer -> mtu - sizeof (ENetProtocolHeader) - sizeof (ENetProtocolSendFragment);
+   if (peer->host->usingNewPacket) {
+       fragmentLength = peer->mtu - sizeof(ENetProtocolHeaderUbisoft) - sizeof(ENetProtocolSendFragment);
+   } else {
+       fragmentLength = peer->mtu - sizeof(ENetProtocolHeader) - sizeof(ENetProtocolSendFragment);
+   }
    if (peer -> host -> checksum != NULL)
      fragmentLength -= sizeof(enet_uint32);
 
