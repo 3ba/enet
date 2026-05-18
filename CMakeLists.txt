@@ -71,8 +71,10 @@ set(INCLUDE_FILES_PREFIX include/enet)
 set(INCLUDE_FILES
     ${INCLUDE_FILES_PREFIX}/callbacks.h
     ${INCLUDE_FILES_PREFIX}/enet.h
+    ${INCLUDE_FILES_PREFIX}/address.h
     ${INCLUDE_FILES_PREFIX}/list.h
     ${INCLUDE_FILES_PREFIX}/protocol.h
+    ${INCLUDE_FILES_PREFIX}/socks5.h
     ${INCLUDE_FILES_PREFIX}/time.h
     ${INCLUDE_FILES_PREFIX}/types.h
     ${INCLUDE_FILES_PREFIX}/unix.h
@@ -88,6 +90,7 @@ set(SOURCE_FILES
     packet.c
     peer.c
     protocol.c
+    socks5.c
     unix.c
     win32.c)
 

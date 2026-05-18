@@ -17,6 +17,8 @@
 #include "enet/protocol.h"
 #include "enet/list.h"
 #include "enet/callbacks.h"
+#include "enet/socks5.h"
+#include "enet/address.h"
 
 #define ENET_VERSION_MAJOR 1
 #define ENET_VERSION_MINOR 3
@@ -71,22 +73,6 @@ typedef enum _ENetSocketShutdown
 #define ENET_HOST_ANY       0
 #define ENET_HOST_BROADCAST 0xFFFFFFFFU
 #define ENET_PORT_ANY       0
-
-/**
- * Portable internet address structure. 
- *
- * The host must be specified in network byte-order, and the port must be in host 
- * byte-order. The constant ENET_HOST_ANY may be used to specify the default 
- * server host. The constant ENET_HOST_BROADCAST may be used to specify the
- * broadcast address (255.255.255.255).  This makes sense for enet_host_connect,
- * but not for enet_host_create.  Once a server responds to a broadcast, the
- * address is updated from ENET_HOST_BROADCAST to the server's actual IP address.
- */
-typedef struct _ENetAddress
-{
-   enet_uint32 host;
-   enet_uint16 port;
-} ENetAddress;
 
 /**
  * Packet flag bit constants.
@@ -359,7 +345,9 @@ typedef int (ENET_CALLBACK * ENetInterceptCallback) (struct _ENetHost * host, st
 typedef struct _ENetHost
 {
    ENetSocket           socket;
+   ENetSocket           tcpSocket;                   /**< TCP socket for initial SOCKS5 handshake */
    ENetAddress          address;                     /**< Internet address of the host */
+   ENetSocks5Proxy      proxy;                       /**< SOCKS5 proxy */
    enet_uint32          incomingBandwidth;           /**< downstream bandwidth of the host */
    enet_uint32          outgoingBandwidth;           /**< upstream bandwidth of the host */
    enet_uint32          bandwidthThrottleEpoch;
@@ -396,6 +384,7 @@ typedef struct _ENetHost
    size_t               maximumWaitingData;          /**< the maximum aggregate amount of buffer space a peer may use waiting for packets to be delivered */
    int                  usingNewPacket;              /**< optional setting to enable the use of outgoing ubisoft protocol headers */
    int                  handleNewPacket;             /**< optional setting to process packets containing ubisoft protocol headers */ 
+   int                  usingProxy;                  /**< optional setting to enable the use of SOCKS5 proxy */
 } ENetHost;
 
 /**
@@ -404,12 +393,12 @@ typedef struct _ENetHost
 typedef enum _ENetEventType
 {
    /** no event occurred within the specified time limit */
-   ENET_EVENT_TYPE_NONE       = 0,  
+   ENET_EVENT_TYPE_NONE          = 0,  
 
    /** a connection request initiated by enet_host_connect has completed.  
      * The peer field contains the peer which successfully connected. 
      */
-   ENET_EVENT_TYPE_CONNECT    = 1,  
+   ENET_EVENT_TYPE_CONNECT       = 1,  
 
    /** a peer has disconnected.  This event is generated on a successful 
      * completion of a disconnect initiated by enet_peer_disconnect, if 
@@ -418,7 +407,7 @@ typedef enum _ENetEventType
      * which disconnected. The data field contains user supplied data 
      * describing the disconnection, or 0, if none is available.
      */
-   ENET_EVENT_TYPE_DISCONNECT = 2,  
+   ENET_EVENT_TYPE_DISCONNECT    = 2,  
 
    /** a packet has been received from a peer.  The peer field specifies the
      * peer which sent the packet.  The channelID field specifies the channel
@@ -426,7 +415,12 @@ typedef enum _ENetEventType
      * the packet that was received; this packet must be destroyed with
      * enet_packet_destroy after use.
      */
-   ENET_EVENT_TYPE_RECEIVE    = 3
+   ENET_EVENT_TYPE_RECEIVE       = 3,
+
+   /** state of the SOCKS5 proxy has been updated.
+     * The data field contains the new state of the SOCKS5 proxy.
+     */
+   ENET_EVENT_TYPE_PROXY_UPDATE  = 4
 } ENetEventType;
 
 /**
@@ -568,6 +562,10 @@ ENET_API enet_uint32  enet_crc32 (const ENetBuffer *, size_t);
 ENET_API ENetHost * enet_host_create (const ENetAddress *, size_t, size_t, enet_uint32, enet_uint32);
 ENET_API void       enet_host_destroy (ENetHost *);
 ENET_API ENetPeer * enet_host_connect (ENetHost *, const ENetAddress *, size_t, enet_uint32);
+ENET_API int        enet_host_connect_proxy (ENetHost *);
+ENET_API void       enet_host_set_proxy (ENetHost *, ENetSocks5ProxyInfo *);
+ENET_API void       enet_host_set_proxy_header (ENetHost *, const ENetAddress *);
+ENET_API int        enet_host_proxy (ENetHost *, ENetEvent *);
 ENET_API int        enet_host_check_events (ENetHost *, ENetEvent *);
 ENET_API int        enet_host_service (ENetHost *, ENetEvent *, enet_uint32);
 ENET_API void       enet_host_flush (ENetHost *);
