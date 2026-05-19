@@ -251,9 +251,10 @@ typedef struct _ENetPeer
    enet_uint32   connectID;
    enet_uint8    outgoingSessionID;
    enet_uint8    incomingSessionID;
-   ENetAddress   address;            /**< Internet address of the peer */
+   ENetAddress   address;            /**< Internet address or SOCKS5 relay address of the peer */
    void *        data;               /**< Application private data, may be freely modified */
    ENetPeerState state;
+   ENetSocks5IPv4Header proxyHeader; /**< SOCKS5 proxy header for the peer */
    ENetChannel * channels;
    size_t        channelCount;       /**< Number of channels allocated for communication with peer */
    enet_uint32   incomingBandwidth;  /**< Downstream bandwidth of the client in bytes/second */
@@ -564,7 +565,6 @@ ENET_API void       enet_host_destroy (ENetHost *);
 ENET_API ENetPeer * enet_host_connect (ENetHost *, const ENetAddress *, size_t, enet_uint32);
 ENET_API int        enet_host_connect_proxy (ENetHost *);
 ENET_API void       enet_host_set_proxy (ENetHost *, ENetSocks5ProxyInfo *);
-ENET_API void       enet_host_set_proxy_header (ENetHost *, const ENetAddress *);
 ENET_API int        enet_host_proxy (ENetHost *, ENetEvent *);
 ENET_API int        enet_host_check_events (ENetHost *, ENetEvent *);
 ENET_API int        enet_host_service (ENetHost *, ENetEvent *, enet_uint32);
@@ -587,6 +587,7 @@ ENET_API void                enet_peer_reset (ENetPeer *);
 ENET_API void                enet_peer_disconnect (ENetPeer *, enet_uint32);
 ENET_API void                enet_peer_disconnect_now (ENetPeer *, enet_uint32);
 ENET_API void                enet_peer_disconnect_later (ENetPeer *, enet_uint32);
+ENET_API void                enet_peer_set_proxy_header (ENetPeer *, const ENetAddress *);
 ENET_API void                enet_peer_throttle_configure (ENetPeer *, enet_uint32, enet_uint32, enet_uint32);
 extern int                   enet_peer_throttle (ENetPeer *, enet_uint32);
 extern void                  enet_peer_reset_queues (ENetPeer *);

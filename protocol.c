@@ -1010,7 +1010,7 @@ enet_protocol_handle_verify_connect (ENetHost * host, ENetEvent * event, ENetPee
 }
 
 static int
-enet_protocol_append_socks5_header (ENetHost * host)
+enet_protocol_append_socks5_header (ENetHost * host, ENetPeer * peer)
 {
     if (host -> bufferCount >= ENET_BUFFER_MAXIMUM)
       return -1;
@@ -1020,7 +1020,7 @@ enet_protocol_append_socks5_header (ENetHost * host)
     ++ host -> bufferCount;
 
     host -> buffers [0].dataLength = sizeof (ENetSocks5IPv4Header);
-    host -> buffers [0].data = & host -> proxy.header;
+    host -> buffers [0].data = & peer -> proxyHeader;
 
     return 0;
 }
@@ -1665,20 +1665,6 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
 
     enet_list_clear (& sentUnreliableCommands);
 
-    if (host -> usingNewPacket)
-    {
-      enet_uint16 port = host -> usingProxy
-                       ? ENET_NET_TO_HOST_16 (host -> proxy.header.address.port)
-                       : host -> peers -> address.port;
-
-      enet_uint16 rand1 = rand() % (port + 1);
-      enet_uint16 rand2 = rand();
-
-      newHeader->integrity[0] = ENET_HOST_TO_NET_16(rand1);
-      newHeader->integrity[1] = ENET_HOST_TO_NET_16(rand1 ^ port);
-      newHeader->integrity[2] = ENET_NET_TO_HOST_16(rand2 & 0xF3DF | 0x920D);
-    }
-
     for (int sendPass = 0, continueSending = 0; sendPass <= continueSending; ++ sendPass)
     for (ENetPeer * currentPeer = host -> peers;
          currentPeer < & host -> peers [host -> peerCount];
@@ -1688,6 +1674,20 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
             currentPeer -> state == ENET_PEER_STATE_ZOMBIE ||
             (sendPass > 0 && ! (currentPeer -> flags & ENET_PEER_FLAG_CONTINUE_SENDING)))
           continue;
+
+        if (host -> usingNewPacket)
+        {
+           enet_uint16 port = host -> usingProxy
+                            ? ENET_NET_TO_HOST_16 (currentPeer -> proxyHeader.address.port)
+                            : currentPeer -> address.port;
+
+           enet_uint16 rand1 = rand () % (port + 1);
+           enet_uint16 rand2 = rand ();
+
+           newHeader -> integrity [0] = ENET_HOST_TO_NET_16 (rand1);
+           newHeader -> integrity [1] = ENET_HOST_TO_NET_16 (rand1 ^ port);
+           newHeader -> integrity [2] = ENET_NET_TO_HOST_16 (rand2 & 0xF3DF | 0x920D);
+        }
 
         currentPeer -> flags &= ~ ENET_PEER_FLAG_CONTINUE_SENDING;
 
@@ -1803,7 +1803,7 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
 
         currentPeer -> lastSendTime = host -> serviceTime;
 
-        if (host -> usingProxy && enet_protocol_append_socks5_header (host) != 0)
+        if (host -> usingProxy && enet_protocol_append_socks5_header (host, currentPeer) != 0)
           return -1;
 
         sentLength = enet_socket_send (host -> socket, & currentPeer -> address, host -> buffers, host -> bufferCount);
@@ -1878,6 +1878,19 @@ enet_host_service (ENetHost * host, ENetEvent * event, enet_uint32 timeout)
     if (host -> usingProxy &&
         host -> proxy.state != ENET_SOCKS5_STATE_CONNECTED)
        return enet_host_proxy (host, event);
+
+    if (host -> usingProxy)
+    {
+       ENetPeer * currentPeer;
+
+       for (currentPeer = host -> peers;
+            currentPeer < & host -> peers [host -> peerCount];
+            ++ currentPeer)
+       {
+          if (currentPeer -> state == ENET_PEER_STATE_CONNECTING)
+             currentPeer -> address = host -> address;
+       }
+    }
 
     enet_uint32 waitCondition;
 
@@ -2148,7 +2161,6 @@ enet_host_proxy (ENetHost * host, ENetEvent * event)
     case ENET_SOCKS5_STATE_RECEIVE_CONNECT_RESPONSE:
     {
        ENetSocks5ConnectResponse response;
-       ENetPeer * currentPeer;
 
        memset (& response, 0, sizeof (response));
 
@@ -2169,18 +2181,6 @@ enet_host_proxy (ENetHost * host, ENetEvent * event)
           {
              host -> address.host = response.address.host;
              host -> address.port = ENET_NET_TO_HOST_16 (response.address.port);
-
-             for (currentPeer = host -> peers;
-                  currentPeer < & host -> peers [host -> peerCount];
-                  ++ currentPeer)
-             {
-                if (currentPeer -> state == ENET_PEER_STATE_CONNECTING)
-                {
-                   currentPeer -> address = host -> address;
-                   break;
-                }
-             }
-
              host -> proxy.state = ENET_SOCKS5_STATE_CONNECTED;
           }
        }

@@ -135,7 +135,6 @@ typedef struct _ENetSocks5ProxyInfo
 typedef struct _ENetSocks5Proxy
 {
    ENetSocks5ProxyInfo info;
-   ENetSocks5IPv4Header header;
    ENetSocks5State state;
 } ENetSocks5Proxy;
 

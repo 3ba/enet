@@ -205,16 +205,7 @@ enet_host_connect (ENetHost * host, const ENetAddress * address, size_t channelC
     else
     if (channelCount > ENET_PROTOCOL_MAXIMUM_CHANNEL_COUNT)
       channelCount = ENET_PROTOCOL_MAXIMUM_CHANNEL_COUNT;
-
-    if (host -> usingProxy)
-    {
-       if (enet_host_connect_proxy (host) < 0)
-         return NULL;
-
-       host -> proxy.state = ENET_SOCKS5_STATE_SEND_GREETING_REQUEST;
-       enet_host_set_proxy_header (host, address);
-    }
-    
+  
     for (currentPeer = host -> peers;
          currentPeer < & host -> peers [host -> peerCount];
          ++ currentPeer)
@@ -229,11 +220,28 @@ enet_host_connect (ENetHost * host, const ENetAddress * address, size_t channelC
     currentPeer -> channels = (ENetChannel *) enet_malloc (channelCount * sizeof (ENetChannel));
     if (currentPeer -> channels == NULL)
       return NULL;
+
     currentPeer -> channelCount = channelCount;
     currentPeer -> state = ENET_PEER_STATE_CONNECTING;
-    currentPeer -> address = * address;
     currentPeer -> connectID = enet_host_random (host);
     currentPeer -> mtu = host -> mtu;
+
+    if (host -> usingProxy)
+    {
+       if (host -> proxy.state == ENET_SOCKS5_STATE_DISCONNECTED)
+       {
+          if (enet_host_connect_proxy (host) < 0)
+            return NULL;
+
+          host -> proxy.state = ENET_SOCKS5_STATE_SEND_GREETING_REQUEST;
+       }
+
+       enet_peer_set_proxy_header (currentPeer, address);
+    }
+    else
+    {
+       currentPeer -> address = * address;
+    }
 
     if (host -> outgoingBandwidth == 0)
       currentPeer -> windowSize = ENET_PROTOCOL_MAXIMUM_WINDOW_SIZE;
@@ -307,20 +315,6 @@ enet_host_set_proxy (ENetHost * host, ENetSocks5ProxyInfo * proxy)
       memcpy (& host -> proxy.info, proxy, sizeof (ENetSocks5ProxyInfo));
 
     host -> usingProxy = proxy != NULL;
-}
-
-/** Sets the proxy header of the proxy.
-    @param host host to set the proxy header for
-    @param address destination address
-*/
-void
-enet_host_set_proxy_header (ENetHost * host, const ENetAddress * address)
-{
-    host -> proxy.header.reserved = 0;
-    host -> proxy.header.fragment = 0;
-    host -> proxy.header.addressType = ENET_SOCKS5_ADDRESS_TYPE_IPV4;
-    host -> proxy.header.address.host = address -> host;
-    host -> proxy.header.address.port = ENET_HOST_TO_NET_16 (address -> port);
 }
 
 /** Queues a packet to be sent to all peers associated with the host.
