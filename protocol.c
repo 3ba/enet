@@ -2,7 +2,6 @@
  @file  protocol.c
  @brief ENet protocol functions
 */
-#include "enet/protocol.h"
 #include <stdio.h>
 #include <string.h>
 #define ENET_BUILDING_LIB 1
@@ -1009,6 +1008,23 @@ enet_protocol_handle_verify_connect (ENetHost * host, ENetEvent * event, ENetPee
     enet_protocol_notify_connect (host, peer, event);
     return 0;
 }
+
+static int
+enet_protocol_append_socks5_header (ENetHost * host, ENetPeer * peer)
+{
+    if (host -> bufferCount >= ENET_BUFFER_MAXIMUM)
+      return -1;
+
+    memmove (& host -> buffers [1], & host -> buffers [0], sizeof (host -> buffers) - sizeof (host -> buffers [0]));
+
+    ++ host -> bufferCount;
+
+    host -> buffers [0].dataLength = sizeof (ENetSocks5IPv4Header);
+    host -> buffers [0].data = & peer -> proxyHeader;
+
+    return 0;
+}
+
 static int
 enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
 {
@@ -1264,7 +1280,7 @@ enet_protocol_receive_incoming_commands (ENetHost * host, ENetEvent * event)
 
     for (packets = 0; packets < 256; ++ packets)
     {
-       int receivedLength;
+       int receivedLength, receivedSocks5ProxyHeaderLength = 0;
        ENetBuffer buffer;
 
        buffer.data = host -> packetData [0];
@@ -1284,8 +1300,18 @@ enet_protocol_receive_incoming_commands (ENetHost * host, ENetEvent * event)
        if (receivedLength == 0)
          return 0;
 
+       if (host -> usingProxy && receivedLength < (int) sizeof (ENetSocks5IPv4Header))
+         continue;
+
+       if (host -> usingProxy)
+       {
+         receivedSocks5ProxyHeaderLength = sizeof (ENetSocks5IPv4Header);
+         memmove (buffer.data, (const enet_uint8 *) buffer.data + receivedSocks5ProxyHeaderLength,
+                  receivedLength - receivedSocks5ProxyHeaderLength);
+       }
+  
        host -> receivedData = host -> packetData [0];
-       host -> receivedDataLength = receivedLength;
+       host -> receivedDataLength = receivedLength - receivedSocks5ProxyHeaderLength;
       
        host -> totalReceivedData += receivedLength;
        host -> totalReceivedPackets ++;
@@ -1639,18 +1665,6 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
 
     enet_list_clear (& sentUnreliableCommands);
 
-    if (host->usingNewPacket)
-    {
-      enet_uint16 port = host->peers->address.port;
-
-      enet_uint16 rand1 = rand() % (port + 1);
-      enet_uint16 rand2 = rand();
-
-      newHeader->integrity[0] = ENET_HOST_TO_NET_16(rand1);
-      newHeader->integrity[1] = ENET_HOST_TO_NET_16(rand1 ^ port);
-      newHeader->integrity[2] = ENET_NET_TO_HOST_16(rand2 & 0xF7DF | 0x9005);
-    }
-
     for (int sendPass = 0, continueSending = 0; sendPass <= continueSending; ++ sendPass)
     for (ENetPeer * currentPeer = host -> peers;
          currentPeer < & host -> peers [host -> peerCount];
@@ -1660,6 +1674,20 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
             currentPeer -> state == ENET_PEER_STATE_ZOMBIE ||
             (sendPass > 0 && ! (currentPeer -> flags & ENET_PEER_FLAG_CONTINUE_SENDING)))
           continue;
+
+        if (host -> usingNewPacket)
+        {
+           enet_uint16 port = host -> usingProxy
+                            ? ENET_NET_TO_HOST_16 (currentPeer -> proxyHeader.address.port)
+                            : currentPeer -> address.port;
+
+           enet_uint16 rand1 = rand () % (port + 1);
+           enet_uint16 rand2 = rand ();
+
+           newHeader -> integrity [0] = ENET_HOST_TO_NET_16 (rand1);
+           newHeader -> integrity [1] = ENET_HOST_TO_NET_16 (rand1 ^ port);
+           newHeader -> integrity [2] = ENET_NET_TO_HOST_16 (rand2 & 0xF3DF | 0x920D);
+        }
 
         currentPeer -> flags &= ~ ENET_PEER_FLAG_CONTINUE_SENDING;
 
@@ -1775,6 +1803,9 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
 
         currentPeer -> lastSendTime = host -> serviceTime;
 
+        if (host -> usingProxy && enet_protocol_append_socks5_header (host, currentPeer) != 0)
+          return -1;
+
         sentLength = enet_socket_send (host -> socket, & currentPeer -> address, host -> buffers, host -> bufferCount);
 
         enet_protocol_remove_sent_unreliable_commands (currentPeer, & sentUnreliableCommands);
@@ -1844,6 +1875,23 @@ enet_host_check_events (ENetHost * host, ENetEvent * event)
 int
 enet_host_service (ENetHost * host, ENetEvent * event, enet_uint32 timeout)
 {
+    if (host -> usingProxy &&
+        host -> proxy.state != ENET_SOCKS5_STATE_CONNECTED)
+       return enet_host_proxy (host, event);
+
+    if (host -> usingProxy)
+    {
+       ENetPeer * currentPeer;
+
+       for (currentPeer = host -> peers;
+            currentPeer < & host -> peers [host -> peerCount];
+            ++ currentPeer)
+       {
+          if (currentPeer -> state == ENET_PEER_STATE_CONNECTING)
+             currentPeer -> address = host -> address;
+       }
+    }
+
     enet_uint32 waitCondition;
 
     if (event != NULL)
@@ -1968,3 +2016,187 @@ enet_host_service (ENetHost * host, ENetEvent * event, enet_uint32 timeout)
     return 0; 
 }
 
+static size_t
+enet_socks5_credential_length (const enet_uint8 * credential)
+{
+    size_t length = 0;
+
+    while (length < 255 && credential [length] != 0)
+      ++ length;
+
+    return length;
+}
+
+int
+enet_host_proxy (ENetHost * host, ENetEvent * event)
+{
+    int currentState = host -> proxy.state;
+    ENetBuffer buffer;
+
+    if (event != NULL)
+    {
+       event -> type = ENET_EVENT_TYPE_NONE;
+       event -> peer = NULL;
+       event -> packet = NULL;
+    }
+
+    switch (currentState)
+    {
+    case ENET_SOCKS5_STATE_SEND_GREETING_REQUEST:
+    {
+       ENetSocks5GreetingRequest request;
+
+       request.version = ENET_SOCKS5_VERSION_NUMBER;
+       request.nmethods = 1;
+       request.methods [0] = (host -> proxy.info.username [0] != 0 && host -> proxy.info.password [0] != 0)
+                           ? ENET_SOCKS5_AUTH_METHOD_USERNAME_PASSWORD
+                           : ENET_SOCKS5_AUTH_METHOD_NONE;
+
+       buffer.data = & request;
+       buffer.dataLength = sizeof (request.version) + sizeof (request.nmethods) + sizeof (request.methods [0]);
+
+       if (enet_socket_send (host -> tcpSocket, & host -> proxy.info.address, & buffer, 1) > 0)
+         host -> proxy.state = ENET_SOCKS5_STATE_RECEIVE_GREETING_RESPONSE;
+    }
+    break;
+
+    case ENET_SOCKS5_STATE_RECEIVE_GREETING_RESPONSE:
+    {
+       ENetSocks5GreetingResponse response;
+
+       memset (& response, 0, sizeof (response));
+
+       buffer.data = & response;
+       buffer.dataLength = sizeof (response);
+
+       if (enet_socket_receive (host -> tcpSocket, & host -> proxy.info.address, & buffer, 1) > 0)
+       {
+          if (response.version != ENET_SOCKS5_VERSION_NUMBER)
+            host -> proxy.state = ENET_SOCKS5_STATE_VERSION_MISMATCH;
+          else
+          if (response.method == ENET_SOCKS5_AUTH_METHOD_NONE)
+            host -> proxy.state = ENET_SOCKS5_STATE_SEND_CONNECT_REQUEST;
+          else
+          if (response.method == ENET_SOCKS5_AUTH_METHOD_USERNAME_PASSWORD)
+            host -> proxy.state = ENET_SOCKS5_STATE_SEND_AUTH_REQUEST;
+          else
+            host -> proxy.state = ENET_SOCKS5_STATE_AUTH_METHOD_NOT_SUPPORTED;
+       }
+    }
+    break;
+
+    case ENET_SOCKS5_STATE_SEND_AUTH_REQUEST:
+    {
+       enet_uint8 packet [2 + 255 + 1 + 255];
+       size_t usernameLength, passwordLength, offset;
+       const enet_uint8 * username = host -> proxy.info.username;
+       const enet_uint8 * password = host -> proxy.info.password;
+
+       usernameLength = enet_socks5_credential_length (username);
+       passwordLength = enet_socks5_credential_length (password);
+
+       if (usernameLength == 0 || passwordLength == 0 || usernameLength > 255 || passwordLength > 255)
+       {
+          host -> proxy.state = ENET_SOCKS5_STATE_AUTH_METHOD_NOT_SUPPORTED;
+          break;
+       }
+
+       offset = 0;
+       packet [offset ++] = ENET_SOCKS5_USER_PASSWORD_VERSION_NUMBER;
+       packet [offset ++] = (enet_uint8) usernameLength;
+       memcpy (packet + offset, username, usernameLength);
+       offset += usernameLength;
+       packet [offset ++] = (enet_uint8) passwordLength;
+       memcpy (packet + offset, password, passwordLength);
+       offset += passwordLength;
+
+       buffer.data = packet;
+       buffer.dataLength = offset;
+
+       if (enet_socket_send (host -> tcpSocket, & host -> proxy.info.address, & buffer, 1) > 0)
+         host -> proxy.state = ENET_SOCKS5_STATE_RECEIVE_AUTH_RESPONSE;
+    }
+    break;
+
+    case ENET_SOCKS5_STATE_RECEIVE_AUTH_RESPONSE:
+    {
+       ENetSocks5AuthUserPasswordResponse response;
+
+       memset (& response, 0, sizeof (response));
+
+       buffer.data = & response;
+       buffer.dataLength = sizeof (response);
+
+       if (enet_socket_receive (host -> tcpSocket, & host -> proxy.info.address, & buffer, 1) > 0)
+       {
+          if (response.authVersion != ENET_SOCKS5_USER_PASSWORD_VERSION_NUMBER)
+            host -> proxy.state = ENET_SOCKS5_STATE_VERSION_MISMATCH;
+          else
+          if (response.status != 0x00)
+            host -> proxy.state = ENET_SOCKS5_STATE_AUTH_FAILURE;
+          else
+            host -> proxy.state = ENET_SOCKS5_STATE_SEND_CONNECT_REQUEST;
+       }
+    }
+    break;
+
+    case ENET_SOCKS5_STATE_SEND_CONNECT_REQUEST:
+    {
+       ENetSocks5ConnectRequest request;
+
+       memset (& request, 0, sizeof (request));
+
+       request.version = ENET_SOCKS5_VERSION_NUMBER;
+       request.command = ENET_SOCKS5_COMMAND_UDP_ASSOCIATE;
+       request.addressType = ENET_SOCKS5_ADDRESS_TYPE_IPV4;
+
+       buffer.data = & request;
+       buffer.dataLength = sizeof (request);
+
+       if (enet_socket_send (host -> tcpSocket, & host -> proxy.info.address, & buffer, 1) > 0)
+         host -> proxy.state = ENET_SOCKS5_STATE_RECEIVE_CONNECT_RESPONSE;
+    }
+    break;
+
+    case ENET_SOCKS5_STATE_RECEIVE_CONNECT_RESPONSE:
+    {
+       ENetSocks5ConnectResponse response;
+
+       memset (& response, 0, sizeof (response));
+
+       buffer.data = & response;
+       buffer.dataLength = sizeof (response);
+
+       if (enet_socket_receive (host -> tcpSocket, & host -> proxy.info.address, & buffer, 1) > 0)
+       {
+          if (response.version != ENET_SOCKS5_VERSION_NUMBER)
+            host -> proxy.state = ENET_SOCKS5_STATE_VERSION_MISMATCH;
+          else
+          if (response.status != 0x00)
+            host -> proxy.state = ENET_SOCKS5_STATE_CONNECT_FAILURE;
+          else
+          if (response.addressType != ENET_SOCKS5_ADDRESS_TYPE_IPV4)
+            host -> proxy.state = ENET_SOCKS5_STATE_ADDRESS_TYPE_NOT_SUPPORTED;
+          else
+          {
+             host -> address.host = response.address.host;
+             host -> address.port = ENET_NET_TO_HOST_16 (response.address.port);
+             host -> proxy.state = ENET_SOCKS5_STATE_CONNECTED;
+          }
+       }
+    }
+    break;
+
+    default:
+       break;
+    }
+
+    if (event != NULL && currentState != host -> proxy.state)
+    {
+       event -> type = ENET_EVENT_TYPE_PROXY_UPDATE;
+       event -> data = host -> proxy.state;
+       return 1;
+    }
+
+    return 0;
+}

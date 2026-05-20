@@ -12,6 +12,7 @@
 [Ww][Ii][Nn]32/
 bld/
 build/
+build-clangd/
 builds/
 out/
 x64/

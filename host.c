@@ -49,10 +49,15 @@ enet_host_create (const ENetAddress * address, size_t peerCount, size_t channelL
     memset (host -> peers, 0, peerCount * sizeof (ENetPeer));
 
     host -> socket = enet_socket_create (ENET_SOCKET_TYPE_DATAGRAM);
+    host -> tcpSocket = enet_socket_create (ENET_SOCKET_TYPE_STREAM);
+
     if (host -> socket == ENET_SOCKET_NULL || (address != NULL && enet_socket_bind (host -> socket, address) < 0))
     {
        if (host -> socket != ENET_SOCKET_NULL)
          enet_socket_destroy (host -> socket);
+
+       if (host -> tcpSocket != ENET_SOCKET_NULL)
+         enet_socket_destroy (host -> tcpSocket);
 
        enet_free (host -> peers);
        enet_free (host);
@@ -64,6 +69,9 @@ enet_host_create (const ENetAddress * address, size_t peerCount, size_t channelL
     enet_socket_set_option (host -> socket, ENET_SOCKOPT_BROADCAST, 1);
     enet_socket_set_option (host -> socket, ENET_SOCKOPT_RCVBUF, ENET_HOST_RECEIVE_BUFFER_SIZE);
     enet_socket_set_option (host -> socket, ENET_SOCKOPT_SNDBUF, ENET_HOST_SEND_BUFFER_SIZE);
+
+    enet_socket_set_option (host -> tcpSocket, ENET_SOCKOPT_NONBLOCK, 1);
+    enet_socket_set_option (host -> tcpSocket, ENET_SOCKOPT_NODELAY, 0);
 
     if (address != NULL && enet_socket_get_address (host -> socket, & host -> address) < 0)   
       host -> address = * address;
@@ -111,6 +119,10 @@ enet_host_create (const ENetAddress * address, size_t peerCount, size_t channelL
 
     host -> intercept = NULL;
 
+    host -> usingNewPacket = 0;
+    host -> handleNewPacket = 0;
+    host -> usingProxy = 0;
+
     enet_list_clear (& host -> dispatchQueue);
 
     for (currentPeer = host -> peers;
@@ -146,7 +158,8 @@ enet_host_destroy (ENetHost * host)
       return;
 
     enet_socket_destroy (host -> socket);
-
+    enet_socket_destroy (host -> tcpSocket);
+    
     for (currentPeer = host -> peers;
          currentPeer < & host -> peers [host -> peerCount];
          ++ currentPeer)
@@ -192,7 +205,7 @@ enet_host_connect (ENetHost * host, const ENetAddress * address, size_t channelC
     else
     if (channelCount > ENET_PROTOCOL_MAXIMUM_CHANNEL_COUNT)
       channelCount = ENET_PROTOCOL_MAXIMUM_CHANNEL_COUNT;
-
+  
     for (currentPeer = host -> peers;
          currentPeer < & host -> peers [host -> peerCount];
          ++ currentPeer)
@@ -207,11 +220,28 @@ enet_host_connect (ENetHost * host, const ENetAddress * address, size_t channelC
     currentPeer -> channels = (ENetChannel *) enet_malloc (channelCount * sizeof (ENetChannel));
     if (currentPeer -> channels == NULL)
       return NULL;
+
     currentPeer -> channelCount = channelCount;
     currentPeer -> state = ENET_PEER_STATE_CONNECTING;
-    currentPeer -> address = * address;
     currentPeer -> connectID = enet_host_random (host);
     currentPeer -> mtu = host -> mtu;
+
+    if (host -> usingProxy)
+    {
+       if (host -> proxy.state == ENET_SOCKS5_STATE_DISCONNECTED)
+       {
+          if (enet_host_connect_proxy (host) < 0)
+            return NULL;
+
+          host -> proxy.state = ENET_SOCKS5_STATE_SEND_GREETING_REQUEST;
+       }
+
+       enet_peer_set_proxy_header (currentPeer, address);
+    }
+    else
+    {
+       currentPeer -> address = * address;
+    }
 
     if (host -> outgoingBandwidth == 0)
       currentPeer -> windowSize = ENET_PROTOCOL_MAXIMUM_WINDOW_SIZE;
@@ -261,6 +291,30 @@ enet_host_connect (ENetHost * host, const ENetAddress * address, size_t channelC
     enet_peer_queue_outgoing_command (currentPeer, & command, NULL, 0, 0);
 
     return currentPeer;
+}
+
+/** Connects to the proxy server with TCP socket.
+    @param host host to connect to the proxy server
+    @returns 0 on success, < 0 on failure
+*/
+int
+enet_host_connect_proxy (ENetHost * host)
+{
+    return enet_socket_connect (host -> tcpSocket, & host -> proxy.info.address);
+}
+
+/** Sets the given socks5 proxy for the host. NULL disables the proxy.
+    @param host host to set the proxy for
+    @param proxy proxy information
+*/
+void
+enet_host_set_proxy (ENetHost * host, ENetSocks5ProxyInfo * proxy)
+{
+    memset (& host -> proxy.info, 0, sizeof (ENetSocks5ProxyInfo));
+    if (proxy != NULL)
+      memcpy (& host -> proxy.info, proxy, sizeof (ENetSocks5ProxyInfo));
+
+    host -> usingProxy = proxy != NULL;
 }
 
 /** Queues a packet to be sent to all peers associated with the host.

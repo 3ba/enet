@@ -607,6 +607,20 @@ enet_peer_disconnect_later (ENetPeer * peer, enet_uint32 data)
       enet_peer_disconnect (peer, data);
 }
 
+/** Sets the SOCKS5 UDP header destination for a peer.
+    @param peer peer to configure
+    @param address ultimate destination address for proxied packets
+*/
+void
+enet_peer_set_proxy_header (ENetPeer * peer, const ENetAddress * address)
+{
+    peer -> proxyHeader.reserved = 0;
+    peer -> proxyHeader.fragment = 0;
+    peer -> proxyHeader.addressType = ENET_SOCKS5_ADDRESS_TYPE_IPV4;
+    peer -> proxyHeader.address.host = address -> host;
+    peer -> proxyHeader.address.port = ENET_HOST_TO_NET_16 (address -> port);
+}
+
 ENetAcknowledgement *
 enet_peer_queue_acknowledgement (ENetPeer * peer, const ENetProtocol * command, enet_uint16 sentTime)
 {
