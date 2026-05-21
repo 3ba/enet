@@ -1029,7 +1029,6 @@ static int
 enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
 {
     enet_uint8 handleNewPacket = host -> handleNewPacket && host -> address.port != 0;
-    size_t protocolHeaderSize = handleNewPacket ? sizeof (ENetProtocolHeaderUbisoft) : sizeof (ENetProtocolHeader);
 
     ENetProtocolHeader * header = NULL;
     ENetProtocolHeaderUbisoft * ubisoftHeader = NULL;
@@ -1755,12 +1754,13 @@ enet_protocol_send_outgoing_commands (ENetHost * host, ENetEvent * event, int ch
             host -> buffers -> dataLength = packetSize;
         }
         else
-          host -> buffers -> dataLength = ENET_OFFSETOF(ENetProtocolHeader, sentTime);
+          host -> buffers -> dataLength = host->usingNewPacket ? 
+            ENET_OFFSETOF(ENetProtocolHeaderUbisoft, sentTime) : ENET_OFFSETOF(ENetProtocolHeader, sentTime);
 
         shouldCompress = 0;
         if (host -> compressor.context != NULL && host -> compressor.compress != NULL)
         {
-            size_t originalSize = host -> packetSize - sizeof(ENetProtocolHeader),
+            size_t originalSize = host -> packetSize - packetSize,
                    compressedSize = host -> compressor.compress (host -> compressor.context,
                                         & host -> buffers [1], host -> bufferCount - 1,
                                         originalSize,
